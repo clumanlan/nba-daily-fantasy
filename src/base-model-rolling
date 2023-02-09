@@ -1,0 +1,92 @@
+import pandas as pd
+from datetime import datetime, timedelta
+from nba_api.stats.static import teams, players
+import time
+from pulp import *
+import numpy as np
+import mlflow
+import mlflow.sklearn
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+
+
+active_playergamelog = pd.read_parquet('projects/nba-daily-fantasy/data/active_playergamelog_2023_01_19.parquet')
+active_playergamelog['SEASON_ID'] = active_playergamelog['SEASON_ID'].astype('int')
+
+def calculate_fantasy_points(df):
+        return df['PTS'] + df['FG3M']*0.5 + df['REB']*1.25 + df['AST']*1.5 + df['STL']*2 + df['BLK']*2 - df['TOV']*0.5
+
+active_playergamelog = (active_playergamelog
+    .assign(fp = calculate_fantasy_points(active_playergamelog))
+    )
+
+rel_base_num_cols = ['MIN', 'FGM', 'FGA', 'FG3M', 'FG3A','FTM', 'FTA',
+       'FT_PCT', 'OREB', 'DREB', 'REB', 'AST', 'STL', 'BLK', 'TOV', 'PF',
+       'PTS', 'PLUS_MINUS']
+
+active_playergamelog_base = active_playergamelog[['SEASON_ID', 'Player_ID'] + rel_base_num_cols]
+
+
+def create_aggregate_rolling_functions(window_num = 10, window_min = 1):
+    ## aggregate rolling functions to create summary stats
+    f_min = lambda x: x.rolling(window=window_num, min_periods=window_min).min() 
+    f_max = lambda x: x.rolling(window=window_num, min_periods=window_min).max()
+    f_mean = lambda x: x.rolling(window=window_num, min_periods=window_min).mean()
+    f_std = lambda x: x.rolling(window=window_num, min_periods=window_min).std()
+    f_sum = lambda x: x.rolling(window=window_num, min_periods=window_min).sum()
+
+    return f_min, f_max, f_mean, f_std, f_sum
+
+def create_lagged_player_stats(df, rel_num_cols):
+
+    df = (
+        df.assign(**{
+        f'player_{col}_lagged': df.sort_values(['GAME_DATE']).groupby(['Player_ID', 'SEASON_ID'], group_keys=False)[col].shift(1)
+        for col in rel_base_num_cols})
+        .reset_index(drop=True)
+    )
+
+    df.drop(rel_base_num_cols, axis=1, inplace=True)
+
+    function_list = [f_min, f_max, f_mean, f_std, f_sum]
+    function_name = ['min', 'max', 'mean', 'std', 'sum']
+
+    for col in df.columns[df.columns.str.endswith('_lagged')]:
+        print(col)
+        for i in range(len(function_list)):
+            df[(col + '_%s' % function_name[i])] = df.sort_values(['GAME_DATE']).groupby(['Player_ID', 'SEASON_ID'], group_keys=False)[col].apply(function_list[i])
+            print(function_name[i])
+
+    return df
+
+
+ f_min, f_max, f_mean, f_std, f_sum = create_aggregate_rolling_functions()
+
+
+
+# SET UP VALIDATION METHODS -----------------------------------------------
+
+def eval_metrics(actual, pred):
+    rmse = np.sqrt(mean_squared_error(actual, pred))
+    mae = mean_absolute_error(actual, pred)
+    r2_score = r2_score(actual, pred)
+    
+    return rmse, mae, r2_score 
+
+train = active_playergamelog_base[active_playergamelog_base['SEASON_ID'] < 22019]
+test = active_playergamelog_base[active_playergamelog_base['SEASON_ID'] >= 22019]
+
+
+
+remote_server_uri = 'http://127.0.0.1:5000'
+mlflow.set_tracking_uri(remote_server_uri)
+
+# TRAIN QB MODEL -----------------------------------------------------------
+exp_name = 'nba_fantasy_regression'
+mlflow.create_experiment(exp_name)
+
+mlflow.set_experiment(exp_name)
+
+with mlflow.start_run() as run:
+
+    mlflow.set_tag('mlflow.runName', 'baseline_model_rolling_6') # set tag with run name so we can search for it later
+
