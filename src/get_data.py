@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-import datetime
+from datetime import datetime, timedelta, date
 import awswrangler as wr
 import time as time
 import matplotlib.pyplot as plt
@@ -10,11 +10,157 @@ from sktime.forecasting.fbprophet import Prophet
 
 from nba_api.stats.static import teams, players
 
-from nba_api.stats.endpoints import playergamelog, commonplayerinfo
+from nba_api.stats.endpoints import playergamelog, commonplayerinfo, ScoreboardV2, BoxScoreAdvancedV2
 from nba_api.stats.library.parameters import SeasonAll
 from nba_api.stats.static import players
 
-dk_salaries = pd.read_csv("projects/nba-daily-fantasy/data/dk_salaries_2023_01_16.csv")
+from datetime import date
+
+
+
+def get_game_header_n_line_score(start_date):
+
+    game_header_w_standings_list = []
+    team_game_line_score_list = []
+    error_dates_list = []
+
+    start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
+    end_date = date.today()
+
+    current_date = start_date
+
+    while current_date <= end_date:
+        try:
+            scoreboard = ScoreboardV2(game_date=current_date, league_id='00')
+
+            game_header = scoreboard.game_header.get_data_frame()
+            series_standings = scoreboard.series_standings.get_data_frame()
+            series_standings.drop(['HOME_TEAM_ID', 'VISITOR_TEAM_ID', 'GAME_DATE_EST'], axis=1, inplace=True)
+
+            game_header_w_standings = game_header.merge(series_standings, on='GAME_ID')
+            game_header_w_standings_list.append(game_header_w_standings)
+
+            # each line rpresents a game-teamid
+            team_game_line_score = scoreboard.line_score.get_data_frame()
+            team_game_line_score_list.append(team_game_line_score)
+        
+        except Exception as e:
+            error_dates_list.append(current_date)
+            print(f'error {current_date}')
+
+        current_date += timedelta(days=1)
+        print(current_date)
+
+        time.sleep(1.1)
+
+    game_header_w_standings_complete_df = pd.concat(game_header_w_standings_list)
+    team_game_line_score_complete_df = pd.concat(team_game_line_score_list)
+    error_dates_df = pd.concat(error_dates_list)
+
+    game_header_w_standings_complete_df.reset_index(inplace=True)
+    team_game_line_score_complete_df.reset_index(inplace=True)
+
+    game_ids = game_header_w_standings_complete_df.GAME_ID
+
+    # ONLY RETURN ONE DATAFRAME GAME IDS AND WRITE THE REST TO RELEVANT BUCKETS
+
+    return game_header_w_standings_complete_df, team_game_line_score_complete_df, error_dates_df, game_ids
+
+
+
+
+
+# GET BOXSCORE STATS ------------------------------------------------------------
+## these are just additional boxscore stat metrics (e.g. offesnive rating, usage percentge) 
+def get_player_n_team_boxscore_stats(game_ids):
+
+    player_boxscore_stats_list = []
+    team_boxscore_stats_list = []
+    game_id_list = []
+    error_game_id_list = []
+
+    game_sample_len = len(game_ids)
+    loop_place = 0
+
+    for game_id in game_ids:
+        print(f'Starting {game_id}')
+
+        try:
+            player_boxscore_stats = BoxScoreAdvancedV2(game_id=game_id).player_stats.get_data_frame()
+            time.sleep(1.5)
+            team_boxscore_stats = BoxScoreAdvancedV2(game_id=game_id).team_stats.get_data_frame()
+
+            player_boxscore_stats_list.append(player_boxscore_stats)
+            team_boxscore_stats_list.append(team_boxscore_stats)
+
+            print(f'success {game_id}')
+        
+        except Exception as e:
+            error_game_id_list.append(game_id)
+
+            print(f'error {game_id}')
+        
+        loop_place += 1
+        print(f'{(loop_place/game_sample_len)*100} % complete')
+        time.sleep(1.5)
+
+    player_boxscore_stats_df = pd.concat(player_boxscore_stats_list)
+    player_ids = player_boxscore_stats_df.PLAYER_ID.unique()
+
+    team_boxscore_stats_df = pd.concat(team_boxscore_stats_list)
+    
+
+    error_player_gamelog_df = pd.DataFrame(error_game_id_list)
+
+    # AGAIN WE'LL WRITE EVERYTHING THEN JUST RETURN THE IDS IN HERE 
+
+    return player_boxscore_stats_df, team_boxscore_stats_df, error_player_gamelog_df, player_ids
+
+
+def get_player_gamelog(player_ids):
+
+    active_playergamelog_list = []
+    players_info_length = len(player_ids)
+    loop_place = 0
+
+    error_player_gamelog_list = []
+
+    for id in player_ids:
+
+        print(str(id) + ' starting')
+        
+        for i in range(1990,2023): # we want to account for player history before if a player played before 2002
+            try:
+                gamelog = pd.concat(playergamelog.PlayerGameLog(player_id=id, season=i).get_data_frames())
+
+                if gamelog.shape[0] != 0:
+                    active_playergamelog_list.append(gamelog)
+                    print(str(id), str(i), ' processing')
+
+            except Exception as e:
+                error_player_gamelog_list.append(id)
+                print(f'error on {id} and {i}')
+
+            time.sleep(1.01)
+        
+        loop_place += 1
+        print(str(round((loop_place/players_info_length) *100, 2)) + '%')
+    
+    active_playergamelog_df = pd.concat(active_playergamelog_list)
+    active_playergamelog_df["GAME_DATE"] = pd.to_datetime(active_playergamelog_df["GAME_DATE"], format="%b %d, %Y")
+    active_playergamelog_df.reset_index(inplace=True)
+
+    # WE WRITE THESE TO S3 AGAIN 
+    return active_playergamelog_df, error_player_gamelog_list
+
+
+game_header_w_standings_complete_df, team_game_line_score_complete_df, error_dates_df, game_ids = get_game_header_n_line_score('2023-02-20')
+
+player_boxscore_stats_df, team_boxscore_stats_df, error_player_gamelog_df, player_ids = get_player_n_team_boxscore_stats(game_ids)
+
+active_playergamelog_df, error_player_gamelog_list = get_player_gamelog(player_ids)
+
+player_ids
 
 
 # GET PLAYER INFO ------------------------------------------
@@ -61,105 +207,26 @@ error_player_info_df = pd.DataFrame(error_player_info_list, columns=['player_id_
 error_player_info_df.to_parquet('projects/nba-daily-fantasy/data/error_player_info_df.parquet')
 
 
-
-
 common_player_info_complete_df_filtered = common_player_info_complete_df[['PERSON_ID', 'FROM_YEAR', 'TO_YEAR', 'DISPLAY_FIRST_LAST', 'NBA_FLAG']]
 common_player_info_filtered_currently_active = common_player_info_complete_df_filtered[(common_player_info_complete_df_filtered['TO_YEAR'] == 2022) & (common_player_info_complete_df_filtered['NBA_FLAG'] == 'Y')]
 
 
-active_playergamelog_list = []
-players_info_length = len(common_player_info_filtered_currently_active)
-loop_place = 0
-
-error_player_gamelog_list = []
-
-for id in common_player_info_filtered_currently_active['PERSON_ID']:
-
-    print(str(id) + ' starting')
-    
-    for i in range(2000,2023):
-        try:
-            gamelog = pd.concat(playergamelog.PlayerGameLog(player_id=id, season=i).get_data_frames())
-
-            if gamelog.shape[0] != 0:
-                active_playergamelog_list.append(gamelog)
-                print(str(id), str(i), ' processing')
 
 
-        except Exception as e:
-            error_player_gamelog_list.append(id)
+#active_playergamelog_df.to_parquet('projects/nba-daily-fantasy/data/active_playergamelog_2023_01_19.parquet')
 
-        time.sleep(1.01)
-    
-    loop_place += 1
-    print(str(round((loop_place/players_info_length) *100, 2)) + '%')
-   
-
-
-active_playergamelog_df = pd.concat(active_playergamelog_list)
-active_playergamelog_df["GAME_DATE"] = pd.to_datetime(active_playergamelog_df["GAME_DATE"], format="%b %d, %Y")
-
-
-
-
-
-active_playergamelog_df.to_parquet('projects/nba-daily-fantasy/data/active_playergamelog_2023_01_19.parquet')
-
-error_id_df_2023_active = pd.DataFrame(error_player_gamelog_list)
 error_id_df_2023_active.to_csv('projects/nba-daily-fantasy/data/error_id_df_2023_active.csv')
 
-active_playergamelog_df = pd.read_parquet('projects/nba-daily-fantasy/data/active_playergamelog_2022_12_27.parquet')
- 
-
-# GET DATA GOING FORWARD WILL BE 
-
-
-
-## IMPUTE MISSING VALUES WITH PROPHET IMPUTER --------------------------
-
-
-
-
-# CHECK TO SEE IF THEY MATCH
-
-dk_active_players = dk_salaries[['Name', 'Roster Position', 'Salary']]
-active_player_prophet_unique = pd.Series(active_player_prophet_wnames['full_name'].unique(), name='full_name')
-
-
-test = dk_active_players.merge(active_player_prophet_unique, left_on='Name', right_on='full_name', how='left')
-
-
-active_player_prophet_wnames[active_player_prophet_wnames['full_name'].str.contains('James')]
-
-
-## FILTER RELEVANT PLAYERS AND FORECAST VALUES ------------------------
-
-active_player_prophet_wnames.set_index([''])
-active_player_prophet_wnames.columns
-
-active_player_prophet_filtered = active_player_prophet_wnames[active_player_prophet_wnames['full_name'].isin(dk_active_players['Name'])]
-
-active_player_prophet.filter(full_name = dk_active_players)
-
-forecaster.fit(active_player_prophet)  
-
-fh_ten = np.arange(1, 10)
-y_pred = forecaster.predict(fh=fh_ten)
-
-
-forecaster.predict()
-y_pred
-
-
-
-# BUILD AN OPTIMIZER 
+# GET ALL GAME IDS FOR GIVEN DATES ------------------------------------------------
 
 
 
 
 
-# COMPARE VALUES VERSUS DRAFTKINGS AND ROTOWIRE !!!!!
+#THIS LOOKS LIKE GAME_IDS ALREADY IN TEHRE VERSUS
 
+player_boxscore_stats = pd.read_parquet('projects/nba-daily-fantasy/data/player_boxscore_stats_1.parquet')
+game_ids_already_pulled = player_boxscore_stats.GAME_ID.unique()
 
 
 
