@@ -10,7 +10,7 @@ from sktime.forecasting.fbprophet import Prophet
 
 from nba_api.stats.static import teams, players
 
-from nba_api.stats.endpoints import playergamelog, commonplayerinfo, ScoreboardV2, BoxScoreAdvancedV2
+from nba_api.stats.endpoints import playergamelog, commonplayerinfo, ScoreboardV2, BoxScoreAdvancedV2, BoxScoreTraditionalV2
 from nba_api.stats.library.parameters import SeasonAll
 from nba_api.stats.static import players
 
@@ -68,8 +68,6 @@ def get_game_header_n_line_score(start_date):
 
 
 
-
-
 # GET BOXSCORE STATS ------------------------------------------------------------
 ## these are just additional boxscore stat metrics (e.g. offesnive rating, usage percentge) 
 def get_player_n_team_boxscore_stats(game_ids):
@@ -117,50 +115,42 @@ def get_player_n_team_boxscore_stats(game_ids):
     return player_boxscore_stats_df, team_boxscore_stats_df, error_player_gamelog_df, player_ids
 
 
-def get_player_gamelog(player_ids):
+def get_boxscore_traditional(game_ids):
 
-    active_playergamelog_list = []
-    players_info_length = len(player_ids)
-    loop_place = 0
+    boxscore_trad_list = []
+    boxscore_trad_error_list = []
 
-    error_player_gamelog_list = []
+    for game_id in game_ids:
+        try:
+            boxscore_trad = BoxScoreTraditionalV2(game_id=game_id).player_stats.get_data_frame()
+            boxscore_trad_list.append(boxscore_trad)
 
-    for id in player_ids:
-
-        print(str(id) + ' starting')
+            print(game_id)
         
-        for i in range(1990,2023): # we want to account for player history before if a player played before 2002
-            try:
-                gamelog = pd.concat(playergamelog.PlayerGameLog(player_id=id, season=i).get_data_frames())
+        except Exception as e:
+            boxscore_trad_error_list.append(game_id)
 
-                if gamelog.shape[0] != 0:
-                    active_playergamelog_list.append(gamelog)
-                    print(str(id), str(i), ' processing')
-
-            except Exception as e:
-                error_player_gamelog_list.append(id)
-                print(f'error on {id} and {i}')
-
-            time.sleep(1.01)
+            print(f'error {game_id}')
         
-        loop_place += 1
-        print(str(round((loop_place/players_info_length) *100, 2)) + '%')
-    
-    active_playergamelog_df = pd.concat(active_playergamelog_list)
-    active_playergamelog_df["GAME_DATE"] = pd.to_datetime(active_playergamelog_df["GAME_DATE"], format="%b %d, %Y")
-    active_playergamelog_df.reset_index(inplace=True)
+        time.sleep(1.1)
 
-    # WE WRITE THESE TO S3 AGAIN 
-    return active_playergamelog_df, error_player_gamelog_list
+    boxscore_traditional_df = pd.concat(boxscore_trad_list)
+
+    return boxscore_traditional_df, boxscore_trad_error_list
+
+
+
 
 
 game_header_w_standings_complete_df, team_game_line_score_complete_df, error_dates_df, game_ids = get_game_header_n_line_score('2023-02-20')
 
 player_boxscore_stats_df, team_boxscore_stats_df, error_player_gamelog_df, player_ids = get_player_n_team_boxscore_stats(game_ids)
 
-active_playergamelog_df, error_player_gamelog_list = get_player_gamelog(player_ids)
+boxscore_traditional_df, boxscore_trad_error_list =  get_boxscore_traditional(game_ids)
 
-player_ids
+
+
+
 
 
 # GET PLAYER INFO ------------------------------------------
@@ -217,7 +207,6 @@ common_player_info_filtered_currently_active = common_player_info_complete_df_fi
 
 error_id_df_2023_active.to_csv('projects/nba-daily-fantasy/data/error_id_df_2023_active.csv')
 
-# GET ALL GAME IDS FOR GIVEN DATES ------------------------------------------------
 
 
 
@@ -252,7 +241,42 @@ game_ids_already_pulled = player_boxscore_stats.GAME_ID.unique()
 
 # APPENDIX ----------------------------------------------------------------------
 
+# PLAYER GAMELOG FUNCTION, not used because paging through GAME IDS is better
+def get_player_gamelog(player_ids):
 
+    active_playergamelog_list = []
+    players_info_length = len(player_ids)
+    loop_place = 0
+
+    error_player_gamelog_list = []
+
+    for id in player_ids:
+
+        print(str(id) + ' starting')
+        
+        for i in range(1990,2023): # we want to account for player history before if a player played before 2002
+            try:
+                gamelog = pd.concat(playergamelog.PlayerGameLog(player_id=id, season=i).get_data_frames())
+
+                if gamelog.shape[0] != 0:
+                    active_playergamelog_list.append(gamelog)
+                    print(str(id), str(i), ' processing')
+
+            except Exception as e:
+                error_player_gamelog_list.append(id)
+                print(f'error on {id} and {i}')
+
+            time.sleep(1.01)
+        
+        loop_place += 1
+        print(str(round((loop_place/players_info_length) *100, 2)) + '%')
+    
+    active_playergamelog_df = pd.concat(active_playergamelog_list)
+    active_playergamelog_df["GAME_DATE"] = pd.to_datetime(active_playergamelog_df["GAME_DATE"], format="%b %d, %Y")
+    active_playergamelog_df.reset_index(inplace=True)
+
+    # WE WRITE THESE TO S3 AGAIN 
+    return active_playergamelog_df, error_player_gamelog_list
 # PROPHET TEST ------------------------------------------------
 active_playergamelog_df_train = active_playergamelog_df_train.merge(active_players, how='left', left_on='Player_ID', right_on = 'id')
 
