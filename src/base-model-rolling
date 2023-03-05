@@ -1,8 +1,8 @@
 import pandas as pd
 from datetime import datetime, timedelta
 from nba_api.stats.static import teams, players
-from nba_api.stats.endpoints import BoxScoreAdvancedV2
-import time
+from nba_api.stats.endpoints import BoxScoreAdvancedV2, LeagueGameLog
+import time as time
 from pulp import *
 import numpy as np
 import mlflow
@@ -20,46 +20,100 @@ import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.inspection import permutation_importance
 from sklearn.model_selection import TimeSeriesSplit, cross_val_score
+import time
+import awswrangler as wr
 
-# MAYBE WE CHECK ACTIVE PLAYER GAME LOG EVERY WEEK? 
+
+def get_sec(time_str):
+    """Get seconds from time."""
+    if ':' in time_str:
+        if '.' in time_str:
+            time_str = time_str.replace('.000000', '')
+            m, s = time_str.split(':')
+            time_sec = int(m) *60 + int(s)
+        else:
+            m, s = time_str.split(':')
+            time_sec = int(m)*60 + int(s)
+    
+    if ':' not in time_str:
+        if time_str == 'None':
+            time_sec = 0
+        else: 
+            time_sec = int(time_str)*60
+
+    return time_sec
+
 
 active_playergamelog = pd.read_parquet('projects/nba-daily-fantasy/data/active_playergamelog_2023_01_19.parquet')
 active_playergamelog['SEASON_ID'] = active_playergamelog['SEASON_ID'].astype('int')
 
-rel_game_ids = active_playergamelog.Game_ID.unique()
+game_stats_path = "s3://nbadk-model/game_stats"
+
+game_headers_df = wr.s3.read_parquet(
+    path=game_stats_path,
+    path_suffix = ".parquet" ,
+    use_threads =True
+)
+
+game_headers_df_processed = (game_headers_df
+    .assign(
+        gametype_string = game_headers_df.GAME_ID.str[:3],
+        game_type = lambda x: np.where(x.gametype_string == '001', 'Pre-Season',
+            np.where(x.gametype_string == '002', 'Regular Season',
+            np.where(x.gametype_string == '003', 'All Star',
+            np.where(x.gametype_string == '004', 'Post Season',
+            np.where(x.gametype_string == '005', 'Play-In Tournament', 'unknown'))))),
+        GAME_ID = game_headers_df['GAME_ID'].astype(str),
+        GAME_DATE_EST = pd.to_datetime(game_headers_df['GAME_DATE_EST'])
+
+    )
+)
+
+rel_cols = ['GAME_ID', 'game_type', 'SEASON', 'GAME_DATE_EST', 'HOME_TEAM_ID', 'VISITOR_TEAM_ID', 'HOME_TEAM_WINS', 'HOME_TEAM_LOSSES']
+
+reg_season_games = game_headers_df_processed[(game_headers_df_processed['game_type'] == 'Regular Season') & (game_headers_df_processed['GAME_STATUS_TEXT'] == 'Final')][rel_cols]
+reg_season_games.drop_duplicates(inplace=True)
 
 
+boxscore_trad_path = "s3://nbadk-model/player_stats/boxscore_traditional/"
+
+boxscore_trad_df = wr.s3.read_parquet(
+    path=boxscore_trad_path,
+    path_suffix = ".parquet" ,
+    use_threads =True
+)
+
+boxscore_trad_df['GAME_ID'] = boxscore_trad_df['GAME_ID'].astype(str)
+
+rel_box_base_id_cols = ['GAME_ID', 'PLAYER_ID', 'PLAYER_NAME']
+rel_box_base_cat_cols = ['START_POSITION']
+rel_box_base_num_cols = [ 'MIN', 'FGM', 'FGA', 'FG_PCT', 'FG3M', 'FG3A','FTM', 'FTA',
+       'FT_PCT', 'OREB', 'DREB', 'REB', 'AST', 'STL', 'BLK', 'TO', 'PF', 'PTS', 'PLUS_MINUS']
 
 
+boxscore_trad_df_base = boxscore_trad_df[rel_box_base_id_cols + rel_box_base_cat_cols + rel_box_base_num_cols]
+combined_df_reg_base = boxscore_trad_df_base.merge(reg_season_games[['GAME_ID', 'SEASON', 'GAME_DATE_EST']], how='inner', on='GAME_ID')
 
-player_boxscore_stats = BoxScoreAdvancedV2(game_id='0022001069').player_stats.get_data_frame()
-team_boxscore_stats = BoxScoreAdvancedV2(game_id='0022001069').team_stats.get_data_frame()
+combined_df_reg_base['seconds_played'] = combined_df_reg_base['MIN'].apply(get_sec)
+combined_df_reg_base.drop(['MIN'], axis=1, inplace=True)
 
+rel_box_base_num_cols.remove('MIN')
+rel_box_base_num_cols.append('seconds_played')
 
 ## mlflow server --backend-store-uri sqlite:///mlflow.db --default-artifact-root mlruns/ 
 
-players_list = players.get_players()
-players_df = pd.DataFrame(players_list)
-players_df['id'] = players_df['id'].astype(str)
-players_df = players_df[['id', 'full_name']]
 
-
-active_playergamelog.
 def calculate_fantasy_points(df):
-        return df['PTS'] + df['FG3M']*0.5 + df['REB']*1.25 + df['AST']*1.5 + df['STL']*2 + df['BLK']*2 - df['TOV']*0.5
+        return df['PTS'] + df['FG3M']*0.5 + df['REB']*1.25 + df['AST']*1.5 + df['STL']*2 + df['BLK']*2 - df['TO']*0.5
 
-active_playergamelog = (active_playergamelog
-    .assign(fp = calculate_fantasy_points(active_playergamelog),
-        SEASON_ID = active_playergamelog['SEASON_ID'].astype('int'),
-        Player_ID = active_playergamelog['Player_ID'].astype('str')
+combined_df_reg_base = (combined_df_reg_base
+    .assign(fp = calculate_fantasy_points(combined_df_reg_base),
+        SEASON_ID = lambda x: x['SEASON'].astype('int'),
+        Player_ID = lambda x: x['PLAYER_ID'].astype('str')
         )
     )
 
-rel_base_num_cols = ['MIN', 'FGM', 'FGA', 'FG3M', 'FG3A','FTM', 'FTA',
-       'FT_PCT', 'OREB', 'DREB', 'REB', 'AST', 'STL', 'BLK', 'TOV', 'PF',
-       'PTS', 'PLUS_MINUS']
 
-active_playergamelog_base = active_playergamelog[['SEASON_ID', 'Player_ID', 'GAME_DATE', 'fp'] + rel_base_num_cols]
 
 def create_aggregate_rolling_functions(window_num = 10, window_min = 1):
     ## aggregate rolling functions to create summary stats
@@ -73,16 +127,16 @@ def create_aggregate_rolling_functions(window_num = 10, window_min = 1):
 
 def create_lagged_player_stats(df, rel_num_cols):
     
-    df = df.sort_values(['GAME_DATE'])
+    df = df.sort_values(['GAME_DATE_EST'])
 
     df = (
         df.assign(**{
-        f'player_{col}_lagged': df.groupby(['Player_ID', 'SEASON_ID'], group_keys=False)[col].shift(1)
-        for col in rel_base_num_cols})
+        f'player_{col}_lagged': df.groupby(['PLAYER_ID', 'PLAYER_NAME', 'SEASON_ID'], group_keys=False)[col].shift(1)
+        for col in rel_num_cols})
         .reset_index(drop=True)
     )
 
-    df.drop(rel_base_num_cols, axis=1, inplace=True)
+    df.drop(rel_num_cols, axis=1, inplace=True)
 
     function_list = [f_min, f_max, f_mean, f_std, f_sum]
     function_name = ['min', 'max', 'mean', 'std', 'sum']
@@ -90,7 +144,7 @@ def create_lagged_player_stats(df, rel_num_cols):
     for col in df.columns[df.columns.str.endswith('_lagged')]:
         print(col)
         for i in range(len(function_list)):
-            df[(col + '_%s' % function_name[i])] = df.sort_values(['GAME_DATE']).groupby(['Player_ID', 'SEASON_ID'], group_keys=False)[col].apply(function_list[i])
+            df[(col + '_%s' % function_name[i])] = df.sort_values(['GAME_DATE_EST']).groupby(['PLAYER_ID', 'PLAYER_NAME', 'SEASON_ID'], group_keys=False)[col].apply(function_list[i])
             print(function_name[i])
 
     return df
@@ -101,7 +155,12 @@ def create_lagged_player_stats(df, rel_num_cols):
 # PLAYER ROLLING RANK ----------------------------------------------------
 
 f_min, f_max, f_mean, f_std, f_sum = create_aggregate_rolling_functions()
-active_playergamelog_processed = create_lagged_player_stats(active_playergamelog_base, rel_base_num_cols)
+active_playergamelog_processed = create_lagged_player_stats(combined_df_reg_base, rel_box_base_num_cols)
+
+
+
+
+
 
 
 # TRANSFORMERS ------------------------------------------------------------------
