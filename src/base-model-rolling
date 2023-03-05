@@ -44,9 +44,6 @@ def get_sec(time_str):
     return time_sec
 
 
-active_playergamelog = pd.read_parquet('projects/nba-daily-fantasy/data/active_playergamelog_2023_01_19.parquet')
-active_playergamelog['SEASON_ID'] = active_playergamelog['SEASON_ID'].astype('int')
-
 game_stats_path = "s3://nbadk-model/game_stats"
 
 game_headers_df = wr.s3.read_parquet(
@@ -100,7 +97,7 @@ combined_df_reg_base.drop(['MIN'], axis=1, inplace=True)
 rel_box_base_num_cols.remove('MIN')
 rel_box_base_num_cols.append('seconds_played')
 
-## mlflow server --backend-store-uri sqlite:///mlflow.db --default-artifact-root mlruns/ 
+
 
 
 def calculate_fantasy_points(df):
@@ -155,8 +152,7 @@ def create_lagged_player_stats(df, rel_num_cols):
 # PLAYER ROLLING RANK ----------------------------------------------------
 
 f_min, f_max, f_mean, f_std, f_sum = create_aggregate_rolling_functions()
-active_playergamelog_processed = create_lagged_player_stats(combined_df_reg_base, rel_box_base_num_cols)
-
+combined_df_reg_base_processed = create_lagged_player_stats(combined_df_reg_base, rel_box_base_num_cols)
 
 
 
@@ -174,14 +170,14 @@ class DateTransformer(BaseEstimator, TransformerMixin):
 
     def transform(self, x):
 
-        x['GAME_DATE'] = pd.to_datetime(x['GAME_DATE'])
+        x['GAME_DATE_EST'] = pd.to_datetime(x['GAME_DATE_EST'])
 
-        dayofweek = x.GAME_DATE.dt.dayofweek
-        dayofyear= x.GAME_DATE.dt.dayofyear
-        is_leap_year =  x.GAME_DATE.dt.is_leap_year
-        quarter =  x.GAME_DATE.dt.quarter
-        weekofyear = x.GAME_DATE.dt.weekofyear
-        year = x.GAME_DATE.dt.year
+        dayofweek = x.GAME_DATE_EST.dt.dayofweek
+        dayofyear= x.GAME_DATE_EST.dt.dayofyear
+        is_leap_year =  x.GAME_DATE_EST.dt.is_leap_year
+        quarter =  x.GAME_DATE_EST.dt.quarter
+        weekofyear = x.GAME_DATE_EST.dt.weekofyear
+        year = x.GAME_DATE_EST.dt.year
 
         df_dt = pd.concat([dayofweek, dayofyear,  is_leap_year, quarter, weekofyear, year], axis=1)
 
@@ -195,7 +191,7 @@ date_pipeline = Pipeline(steps=[
 
 # for base model the base columns are all numeric columns
 
-base_cols = [col for col in active_playergamelog_processed.columns if 'lagged' in col]
+base_num_cols = [col for col in combined_df_reg_base_processed.columns if 'lagged' in col]
 
 num_pipeline = Pipeline(steps=[
     ('scale', StandardScaler())
@@ -210,11 +206,13 @@ def eval_metrics(actual, pred):
 
     return rmse, mae, r2
 
+
+# TRAIN MODEL -----------------------------------------------------------
+## mlflow server --backend-store-uri sqlite:///mlflow.db --default-artifact-root mlruns/ 
+
 remote_server_uri = 'http://127.0.0.1:5000'
 mlflow.set_tracking_uri(remote_server_uri)
 
-
-# TRAIN MODEL -----------------------------------------------------------
 exp_name = 'nba_fantasy_regression'
 #mlflow.create_experiment(exp_name)
 
@@ -222,11 +220,11 @@ mlflow.set_experiment(exp_name)
 
 with mlflow.start_run() as run:
     
-    full_data = active_playergamelog_processed[['SEASON_ID', 'Player_ID', 'GAME_DATE','fp'] + base_cols]
+    full_data = combined_df_reg_base_processed[['SEASON_ID', 'PLAYER_ID', 'PLAYER_NAME', 'GAME_DATE_EST','fp'] + base_num_cols]
     full_data.dropna(axis=0, inplace=True)
 
-    train = full_data[full_data['SEASON_ID'] < 22019]
-    test = full_data[full_data['SEASON_ID'] >= 22019]
+    train = full_data[full_data['SEASON_ID'] < 2019]
+    test = full_data[full_data['SEASON_ID'] >= 2019]
 
     X_train = train.drop(['fp'], axis=1)
     y_train = train['fp']
@@ -236,8 +234,8 @@ with mlflow.start_run() as run:
 
     col_trans_pipeline = ColumnTransformer(
         transformers=[
-            ('date', date_pipeline, ['GAME_DATE']),
-            ('numeric', num_pipeline, base_cols)
+            ('date', date_pipeline, ['GAME_DATE_EST']),
+            ('numeric', num_pipeline, base_num_cols)
         ]
     )
 
@@ -253,8 +251,8 @@ with mlflow.start_run() as run:
     y_train_pred = rf_pipeline.predict(X_train)
     (rmse, mae, r2) = eval_metrics(y_train, y_train_pred)
     
-    mlflow.sklearn.log_model(rf_pipeline, "base_add_num_normalization")
-    mlflow.set_tag('mlflow.runName', 'base_add_num_normalization') # set tag with run name so we can search for it later
+    mlflow.sklearn.log_model(rf_pipeline, "base_model_num_only")
+    mlflow.set_tag('mlflow.runName', 'base_model_num_only') # set tag with run name so we can search for it later
 
     params_dict = {"n_estimators": n_estimators, "n_predictors": rf.n_features_in_}
     mlflow.log_params(params_dict)
@@ -307,3 +305,11 @@ sns.regplot(x='fp_actual', y='fp_preds', data=player_subset_train)
 
 
 # NORMALIZE NUMERIC VALUES 
+
+
+
+# APPENDIX ------------------------------
+
+
+active_playergamelog = pd.read_parquet('projects/nba-daily-fantasy/data/active_playergamelog_2023_01_19.parquet')
+active_playergamelog['SEASON_ID'] = active_playergamelog['SEASON_ID'].astype('int')
