@@ -22,6 +22,7 @@ from sklearn.inspection import permutation_importance
 from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 import time
 import awswrangler as wr
+from category_encoders import TargetEncoder
 
 
 def get_sec(time_str):
@@ -66,11 +67,21 @@ game_headers_df_processed = (game_headers_df
     )
 )
 
+
+
+
+game_home_away = game_headers_df_processed[['GAME_ID','HOME_TEAM_ID', 'VISITOR_TEAM_ID']]
+game_home_away = pd.melt(game_home_away, id_vars='GAME_ID', value_name='TEAM_ID')
+game_home_away['home_away'] = np.where(game_home_away['variable'] == 'HOME_TEAM_ID', 'home', 'away')
+
+
 rel_cols = ['GAME_ID', 'game_type', 'SEASON', 'GAME_DATE_EST', 'HOME_TEAM_ID', 'VISITOR_TEAM_ID', 'HOME_TEAM_WINS', 'HOME_TEAM_LOSSES']
 
 reg_season_games = game_headers_df_processed[(game_headers_df_processed['game_type'] == 'Regular Season') & (game_headers_df_processed['GAME_STATUS_TEXT'] == 'Final')][rel_cols]
 reg_season_games.drop_duplicates(inplace=True)
 
+reg_playoff_games =  game_headers_df_processed[(game_headers_df_processed['game_type'].isin(['Regular Season','Post Season', 'Play-In Tournament']) & (game_headers_df_processed['GAME_STATUS_TEXT'] == 'Final')][rel_cols]
+reg_playoff_games.drop_duplicates(inplace=True)
 
 boxscore_trad_path = "s3://nbadk-model/player_stats/boxscore_traditional/"
 
@@ -82,13 +93,18 @@ boxscore_trad_df = wr.s3.read_parquet(
 
 boxscore_trad_df['GAME_ID'] = boxscore_trad_df['GAME_ID'].astype(str)
 
-rel_box_base_id_cols = ['GAME_ID', 'PLAYER_ID', 'PLAYER_NAME', 'START_POSITION']
+# DEFINE NUM FEATURES HERE ---------------------------------------
+
+rel_box_base_id_cols = ['GAME_ID', 'PLAYER_ID', 'PLAYER_NAME', 'START_POSITION', 'TEAM_ID', 'game_type']
 rel_box_base_num_cols = [ 'MIN', 'FGM', 'FGA', 'FG_PCT', 'FG3M', 'FG3A','FTM', 'FTA',
        'FT_PCT', 'OREB', 'DREB', 'REB', 'AST', 'STL', 'BLK', 'TO', 'PF', 'PTS', 'PLUS_MINUS']
 
 
 boxscore_trad_df_base = boxscore_trad_df[rel_box_base_id_cols + rel_box_base_num_cols]
-combined_df_reg_base = boxscore_trad_df_base.merge(reg_season_games[['GAME_ID', 'SEASON', 'GAME_DATE_EST']], how='inner', on='GAME_ID')
+combined_df_reg_base = boxscore_trad_df_base.merge(reg_playoff_games[['GAME_ID', 'SEASON', 'GAME_DATE_EST']], how='inner', on='GAME_ID')
+combined_df_reg_base = combined_df_reg_base.merge(game_home_away, how='left', on=['GAME_ID', 'TEAM_ID'])
+
+
 
 combined_df_reg_base['seconds_played'] = combined_df_reg_base['MIN'].apply(get_sec)
 combined_df_reg_base.drop(['MIN'], axis=1, inplace=True)
@@ -196,7 +212,20 @@ num_pipeline = Pipeline(steps=[
 
 ## cat transformer -----------------------------------------------
 
-cat_cols = ['PLAYER_ID', 'starter']
+cat_cols_high_card = ['PLAYER_ID', 'TEAM_ID']
+
+cat_pipeline_high_card = Pipeline(steps=[
+    ('encoder', TargetEncoder())
+])
+
+
+cat_cols_low_card = ['starter', 'home_away']
+
+cat_pipeline_low_card = Pipeline(steps=[
+    ('encoder', OneHotEncoder(handle_unknown='ignore'))
+])
+
+# TargetEncoder(verbose=1, smoothing=2, min_samples_leaf=2, hierarchy=hierarchical_map, cols=['compass'])
 
 
 # SET UP VALIDATION METHODS -----------------------------------------------
@@ -211,7 +240,6 @@ def eval_metrics(actual, pred):
 
 # TRAIN MODEL -----------------------------------------------------------
 ## mlflow server --backend-store-uri sqlite:///mlflow.db --default-artifact-root mlruns/ 
-
 remote_server_uri = 'http://127.0.0.1:5000'
 mlflow.set_tracking_uri(remote_server_uri)
 
@@ -222,14 +250,14 @@ mlflow.set_experiment(exp_name)
 
 with mlflow.start_run() as run:
     
-    full_data = combined_df_reg_base_processed[['SEASON_ID', 'PLAYER_ID', 'PLAYER_NAME', 'GAME_DATE_EST','fp'] + base_num_cols]
+    full_data = combined_df_reg_base_processed[['SEASON_ID', 'GAME_DATE_EST','fp'] + base_num_cols + cat_cols]
     full_data.dropna(axis=0, inplace=True)
 
     train = full_data[full_data['SEASON_ID'] < 2019]
     test = full_data[full_data['SEASON_ID'] >= 2019]
 
     X_train = train.drop(['fp'], axis=1)
-    y_train = np.log(train['fp']+10)
+    y_train = train['fp']
 
     n_estimators = 10
     rf = RandomForestRegressor(n_estimators=n_estimators, n_jobs=-1)
@@ -237,7 +265,9 @@ with mlflow.start_run() as run:
     col_trans_pipeline = ColumnTransformer(
         transformers=[
             ('date', date_pipeline, ['GAME_DATE_EST']),
-            ('numeric', num_pipeline, base_num_cols)
+            ('numeric', num_pipeline, base_num_cols),
+            ('cat_high', cat_pipeline_high_card, cat_cols_high_card),
+            ('cat_low', cat_pipeline_low_card, cat_cols_low_card)
         ]
     )
 
@@ -246,14 +276,15 @@ with mlflow.start_run() as run:
         ('rf', rf)
     ])
     
+
     tscv = TimeSeriesSplit(n_splits=5)
     cross_val_scores = cross_val_score(rf_pipeline, X_train, y_train, cv=tscv)
     cross_val_score_mean_sqaured_error = cross_val_score(rf_pipeline, X_train, y_train, cv=tscv, scoring='neg_mean_squared_error')
     rf_pipeline.fit(X_train, y_train)
-    y_train_pred = rf_pipeline.predict(X_train)
+    y_train_pred = rf_pipeline.predict(X_train) 
     (rmse, mae, r2) = eval_metrics(y_train, y_train_pred)
     
-    mlflow.set_tag('mlflow.runName', 'base_model_num_only_log_outcome_var') # set tag with run name so we can search for it later
+    mlflow.set_tag('mlflow.runName', 'base_model_num_n_cat') # set tag with run name so we can search for it later
 
     params_dict = {"n_estimators": n_estimators, "n_predictors": rf.n_features_in_}
     mlflow.log_params(params_dict)
@@ -264,10 +295,13 @@ with mlflow.start_run() as run:
     mlflow.log_metric('cross_val_score_avg', cross_val_scores.mean())
     mlflow.log_metric('cross_val_score_rmse', np.mean(np.sqrt(np.abs(cross_val_score_mean_sqaured_error))))
 
-    #mlflow.sklearn.save_model(rf_pipeline, path='projects/nfl-daily-fantasy/base_model_num_only')
+    #mlflow.sklearn.save_model(rf_pipeline, path='projects/nba-daily-fantasy/base_model_num_n_cat')
+
+
+
 
     
-
+print(f"{rfnnodes(rf):,d} tree nodes and {np.median(rfmaxdepths(rf))} median tree height")
 
 from rfpimp import *
 
@@ -275,18 +309,55 @@ rf_base_importance = importances(rf_pipeline, X_train, y_train)  # can you log t
 
 plot_importances(rf_base_importance, color='#4575b4', vscale=1.8)
 
+rfnnodes(rf_pipeline)
 
 
 
+
+
+
+
+
+
+
+
+full_data = combined_df_reg_base_processed[['SEASON_ID', 'GAME_DATE_EST','fp'] + base_num_cols + cat_cols]
+full_data.dropna(axis=0, inplace=True)
+
+train = full_data[full_data['SEASON_ID'] < 2019]
+test = full_data[full_data['SEASON_ID'] >= 2019]
+
+X_train = train.drop(['fp'], axis=1)
+y_train = train['fp']
+
+n_estimators = 10
+rf = RandomForestRegressor(n_estimators=n_estimators, n_jobs=-1)
+
+col_trans_pipeline = ColumnTransformer(
+    transformers=[
+        ('date', date_pipeline, ['GAME_DATE_EST']),
+        ('numeric', num_pipeline, base_num_cols),
+        ('cat', cat_pipeline, cat_cols)
+    ]
+)
+
+rf_pipeline = Pipeline(steps=[
+    ('preprocess', col_trans_pipeline),
+    ('rf', rf)
+])
+
+rf_pipeline.fit(X_train, y_train)
 
 
 
 # can you get feature importance from cross validation?
 # add categorical variables: player, away or home, 
+
 # add numerical variables: number of games played 
+# add additional variables from other tables?
 # eventually switch to xgboost
 
-
+# CREATE ADDITIONAL METRICS BY DIFFERENT GROUPINGS: TEAM, POSITION, PLAYER
 
 
 
