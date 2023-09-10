@@ -23,9 +23,9 @@ jobs:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v3
       # instalss make file
-      name: make
-      run: |
-        make install
+      - name: make
+        run: |
+          make install
       # Runs a single command using the runners shell
       - name: lint
         run: |
