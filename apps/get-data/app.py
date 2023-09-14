@@ -12,6 +12,38 @@ import awswrangler as wr
 
 # Get data from nba api endpoints: game headers, boxscore traditional (team & player level), boxscore advanced (team & player level) and player info
 
+# get game_ids then write game_ids back to S3 to get next time around
+def get_game_ids
+
+
+game_stats_path_initial = "s3://nbadk-model/game_stats/game_header/initial"
+game_stats_path_rolling = "s3://nbadk-model/game_stats/game_header/rolling"
+
+
+game_headers_initial_df = wr.s3.read_parquet(
+    path=game_stats_path_initial,
+    path_suffix = ".parquet" ,
+    use_threads =True
+)
+
+game_header_rolling_df = wr.s3.read_parquet(
+    path=game_stats_path_rolling,
+    path_suffix = ".parquet" ,
+    use_threads =True
+)
+
+game_id_initial = game_headers_initial_df.GAME_ID.drop_duplicates().tolist()
+game_id_rolling = game_header_rolling_df.GAME_ID.drop_duplicates().tolist()
+game_ids_complete = game_id_initial + game_id_rolling
+
+
+wr.s3.to_parquet(
+    df=game_ids_complete,
+    path="s3://nbadk-model/game_stats/game_ids/game_id_initial.parquet"
+)
+
+
+
 
 def get_game_header_n_line_score(start_date):
 
