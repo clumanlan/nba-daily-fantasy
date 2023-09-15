@@ -13,34 +13,69 @@ import awswrangler as wr
 # Get data from nba api endpoints: game headers, boxscore traditional (team & player level), boxscore advanced (team & player level) and player info
 
 # get game_ids then write game_ids back to S3 to get next time around
-def get_game_ids
 
 
-game_stats_path_initial = "s3://nbadk-model/game_stats/game_header/initial"
-game_stats_path_rolling = "s3://nbadk-model/game_stats/game_header/rolling"
+
+def get_game_ids_pulled():
+
+    latest_path = "s3://nbadk-model/game_stats/game_ids/rolling/game_ids_latest.parquet"
+
+    game_ids_pulled = wr.s3.read_parquet(
+        path=latest_path
+    )
+    
+    response = wr.s3.describe_objects(path=latest_path)
+
+    # Extract the LastModified timestamp
+    last_modified = response['s3://nbadk-model/game_stats/game_ids/rolling/game_ids_latest.parquet']['ResponseMetadata']['HTTPHeaders']['last-modified']
+    last_modified = pd.to_datetime(last_modified)
+
+    return game_ids_pulled, last_modified
 
 
-game_headers_initial_df = wr.s3.read_parquet(
-    path=game_stats_path_initial,
-    path_suffix = ".parquet" ,
-    use_threads =True
-)
 
-game_header_rolling_df = wr.s3.read_parquet(
-    path=game_stats_path_rolling,
-    path_suffix = ".parquet" ,
-    use_threads =True
-)
+# WERE HERE NOW ------------------------------------
+def get_game_header_n_line_score(start_date):
 
-game_id_initial = game_headers_initial_df.GAME_ID.drop_duplicates().tolist()
-game_id_rolling = game_header_rolling_df.GAME_ID.drop_duplicates().tolist()
-game_ids_complete = game_id_initial + game_id_rolling
+    error_dates_list = []
 
+    start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
+    end_date = date.today()
 
-wr.s3.to_parquet(
-    df=game_ids_complete,
-    path="s3://nbadk-model/game_stats/game_ids/game_id_initial.parquet"
-)
+    current_date = start_date
+
+    while current_date <= end_date:
+        try:
+            scoreboard = ScoreboardV2(game_date=current_date, league_id='00')
+
+            game_header = scoreboard.game_header.get_data_frame()
+            series_standings = scoreboard.series_standings.get_data_frame()
+            series_standings.drop(['HOME_TEAM_ID', 'VISITOR_TEAM_ID', 'GAME_DATE_EST'], axis=1, inplace=True)
+
+            game_header_w_standings = game_header.merge(series_standings, on='GAME_ID')
+            game_header_w_standings_list.append(game_header_w_standings)
+
+            # each line rpresents a game-teamid
+            team_game_line_score = scoreboard.line_score.get_data_frame()
+            team_game_line_score_list.append(team_game_line_score)
+        
+        except Exception as e:
+            error_dates_list.append(current_date)
+            print(f'error {current_date}')
+
+        current_date += timedelta(days=1)
+        print(current_date)
+
+        time.sleep(1.1)
+
+    game_header_w_standings_complete_df = pd.concat(game_header_w_standings_list)
+    team_game_line_score_complete_df = pd.concat(team_game_line_score_list)
+
+    game_header_w_standings_complete_df.reset_index(inplace=True)
+    team_game_line_score_complete_df.reset_index(inplace=True)
+
+    game_ids = game_header_w_standings_complete_df.GAME_ID.unique()
+    game_ids_df = pd.DataFrame(game_ids, columns=['game_id'])
 
 
 
