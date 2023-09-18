@@ -125,6 +125,9 @@ def create_lagged_team_stats(df, rel_num_cols):
 
     return df
 
+def reindex_by_date(df):
+    dates = pd.date_range(df.GAME_DATE_EST.min(), df.GAME_DATE_EST.max())
+    return df.reindex(dates).ffill()
 
 #%%
 
@@ -263,9 +266,8 @@ boxscore_complete_team = pd.merge(boxscore_complete_team, game_home_away, how='l
 boxscore_complete_team = pd.merge(boxscore_complete_team, game_info_df, on='GAME_ID', how='left')
 boxscore_complete_team = boxscore_complete_team[~boxscore_complete_team['game_type'].isin(['Pre-Season', 'All Star'])]
 
-del player_info_df, game_headers_df, game_headers_df_processed_filtered, boxscore_trad_player_df, boxscore_trad_team_df, boxscore_adv_player_df, game_home_away
+del player_info_df, game_headers_df, game_headers_df_processed_filtered, boxscore_trad_player_df, boxscore_trad_team_df, boxscore_adv_player_df, boxscore_adv_team_df, game_home_away
 #%%
-
 
 
 boxscore_complete_player, boxscore_complete_team
@@ -276,14 +278,19 @@ boxscore_complete_player, boxscore_complete_team
 # CREATE PLAYER LEVEL FEATURES -------------------------------------------------------------------------
 #%%
 
+# filter out players that don't play at all for that game (you can embed feature of last game played 
 
-boxscore_complete_player_processed = (boxscore_complete_player
+
+boxscore_complete_player_processed = boxscore_complete_player[boxscore_complete_player['MIN']!='None']
+
+
+boxscore_complete_player_processed = (boxscore_complete_player_processed
     .assign(
         seconds_played = lambda x: x['MIN'].apply(get_sec),
         fantasy_points = calculate_fantasy_points(boxscore_complete_player),
         SEASON_ID = lambda x: x['SEASON'].astype('int'),
         Player_ID = lambda x: x['PLAYER_ID'].astype('str'),
-        is_starter = np.where(boxscore_complete_player['START_POSITION']=="", False, True)
+        is_starter = lambda x: np.where(x['START_POSITION']=="", False, True)
         )
     .sort_values(by=['GAME_DATE_EST'])
     .reset_index(drop=True)
@@ -394,16 +401,10 @@ boxscore_complete_player_processed['fantasy_points_lagged_mean']  = (
     ['fantasy_points_lagged_mean']
 )
 
-misassigned_2000 = (boxscore_complete_player_processed['GAME_ID'] == '0020000452') & (boxscore_complete_player_processed['PLAYER_ID'].isin([754, 1533, 1683]))
-
-0020200888
 
 
-boxscore_complete_player_processed = boxscore_complete_player_processed[~misassigned_2000]
 
-def reindex_by_date(df):
-    dates = pd.date_range(df.GAME_DATE_EST.min(), df.GAME_DATE_EST.max())
-    return df.reindex(dates).ffill()
+## create player season rankings ---------------------------------
 
 player_season_calendar_list = []
 player_season_ranking_calendar_base = boxscore_complete_player_processed[['PLAYER_ID', 'POSITION', 'fantasy_points_lagged_mean', 'SEASON_ID', 'GAME_DATE_EST']]
@@ -418,53 +419,23 @@ for season in boxscore_complete_player_processed.SEASON_ID.unique():
 
     print(season)
 
-
-
-df = player_season_ranking_calendar_base[player_season_ranking_calendar_base['SEASON_ID']==2002]
-df.index = pd.DatetimeIndex(df.GAME_DATE_EST)
-
-
-df = df.reset_index(drop=True)
-df[['GAME_DATE_EST', 'PLAYER_ID']].value_counts()
-
-
-
-df = df.groupby('PLAYER_ID').apply(reindex_by_date).reset_index(0, drop=True)
-player_season_calendar_list.append(df)
-
-
-s
-[754,1533, 1683]
-boxscore_complete_player_processed[(boxscore_complete_player_processed['GAME_DATE_EST']=='2003-03-07') & (boxscore_complete_player_processed['PLAYER_ID'].isin([238]))].sort_values('PLAYER_ID')
-
-boxscore_complete_player_processed[boxscore_complete_player_processed['GAME_ID']=='0020000453']
-    print(season)
-
-
-
-# create rankings then you can also bin these rankings as well
-
-
 player_season_ranking_calendar_df = pd.concat(player_season_calendar_list)
 player_season_ranking_calendar_df = player_season_ranking_calendar_df[['PLAYER_ID', 'POSITION', 'fantasy_points_lagged_mean', 'SEASON_ID']].reset_index(names='calendar_date')
 player_season_ranking_calendar_df = player_season_ranking_calendar_df.dropna(subset='fantasy_points_lagged_mean')
 player_season_ranking_calendar_df['fantasy_points_rank_overall'] = player_season_ranking_calendar_df.groupby('calendar_date')['fantasy_points_lagged_mean'].rank(ascending=False)
-#player_season_ranking_calendar_df = player_season_ranking_calendar_df.drop(['POSITION', 'SEASON_ID', 'fantasy_points_lagged_mean'], axis=1)
+player_season_ranking_calendar_df = player_season_ranking_calendar_df.drop(['POSITION', 'SEASON_ID', 'fantasy_points_lagged_mean'], axis=1)
 
-player_test = player_season_ranking_calendar_df[player_season_ranking_calendar_df['PLAYER_ID'] == 3]
-day_test = player_season_ranking_calendar_df[player_season_ranking_calendar_df['calendar_date'] == '2001-11-05']
+boxscore_complete_team_processed = pd.merge(boxscore_complete_player_processed, player_season_ranking_calendar_df, left_on= ['GAME_DATE_EST', 'PLAYER_ID'], right_on =['calendar_date', 'PLAYER_ID'], how='left')
 
-day_test.sort_values(by='fantasy_points_rank_overall')
 
-player_season_ranking_calendar_df.PLAYER_ID.unique()
+del player_season_calendar_list, player_season_ranking_calendar_base, player_season_ranking_calendar_df
+
 
 #%%
 
 
 # CREATE TEAM LEVEL FEATURES -------------------------------------------------------------------------
 #%%
-
-boxscore_complete_team['seconds_played'] = boxscore_complete_team['MIN'].apply(get_sec)
 
 boxscore_complete_team_processed = (boxscore_complete_team
     .assign(
@@ -479,35 +450,40 @@ boxscore_complete_team_processed = (boxscore_complete_team
 
 # Get fantasy points allowed from other team
 fantasy_points_allowed = boxscore_complete_team_processed[['GAME_ID', 'TEAM_ID', 'fantasy_points_team']]
-boxscore_complete_team_processed = pd.merge(boxscore_complete_team_processed, fantasy_points_allowed, on='GAME_ID', suffixes=['', '_opposing'], how='left')
-boxscore_complete_team_processed = boxscore_complete_team_processed[boxscore_complete_team_processed['TEAM_ID'] != boxscore_complete_team_processed['TEAM_ID_opposing']]
+boxscore_complete_team_processed = pd.merge(boxscore_complete_team_processed, fantasy_points_allowed, on='GAME_ID', suffixes=['', '_opposing'], how='left').reset_index(drop=True)
+boxscore_complete_team_processed = boxscore_complete_team_processed.query('TEAM_ID != TEAM_ID_opposing')
+
 
 # Lag team fantasy points and opposing team fantasy points
 boxscore_complete_team_processed = boxscore_complete_team_processed.sort_values(['GAME_DATE_EST'])
 
 team_group_shift = boxscore_complete_team_processed.groupby(['TEAM_ID'])[['fantasy_points_team', 'fantasy_points_team_opposing']].shift(1)
 team_group_shift.columns = ['fantasy_points_team_lagged', 'fantasy_points_team_allowed_lagged']
-
 boxscore_complete_team_processed = pd.concat([boxscore_complete_team_processed, team_group_shift], axis=1)
 
-rolling_avg_team = boxscore_complete_team_processed.groupby(['TEAM_ID', 'SEASON_ID'])[['fantasy_points_team', 'fantasy_points_team_opposing']].rolling(window=100, min_periods=1).mean()
-rolling_avg_team = rolling_avg_team.rename(columns={'fantasy_points_team': 'fantasy_points_team_lagged_mean', 'fantasy_points_team_opposing': 'fantasy_points_team_opposing_lagged_mean'})
-rolling_avg_team = rolling_avg_team.reset_index().set_index('level_2').sort_index()
+boxscore_complete_team_processed[['fantasy_points_team_lagged_mean', 'fantasy_points_team_opposing_lagged_mean']] = (
+    boxscore_complete_team_processed
+    .groupby(['TEAM_ID', 'SEASON_ID'])
+    [['fantasy_points_team', 'fantasy_points_team_opposing']]
+    .rolling(window=100, min_periods=1)
+    .mean()
+    .rename(columns={'fantasy_points_team': 'fantasy_points_team_lagged_mean', 'fantasy_points_team_opposing': 'fantasy_points_team_opposing_lagged_mean'})
+    .reset_index()
+    .set_index('level_2')
+    .sort_index()
+    [['fantasy_points_team_lagged_mean', 'fantasy_points_team_opposing_lagged_mean']]
+)
 
-boxscore_complete_team_processed[['fantasy_points_team_lagged_mean', 'fantasy_points_team_opposing_lagged_mean']] = rolling_avg_team[['fantasy_points_team_lagged_mean', 'fantasy_points_team_opposing_lagged_mean']]
 
 
-# Create team ranking of fantasy points scored & allowed
-boxscore_complete_team_processed[boxscore_complete_team_processed.index.duplicated()]
+# create team ranking of fantasy points scored & allowed
 
-def reindex_by_date(df):
-    dates = pd.date_range(df.GAME_DATE_EST.min(), df.GAME_DATE_EST.max())
-    return df.reindex(dates).ffill()
+team_ranking_base = boxscore_complete_team_processed[['TEAM_ID', 'SEASON_ID', 'GAME_DATE_EST', 'fantasy_points_team_lagged_mean', 'fantasy_points_team_opposing_lagged_mean']]
 
 team_season_calendar_list = []
 
 for season in boxscore_complete_team_processed['SEASON_ID'].unique():
-    df = boxscore_complete_team_processed[boxscore_complete_team_processed['SEASON_ID']==season]
+    df = team_ranking_base[team_ranking_base['SEASON_ID']==season]
     df.index = pd.DatetimeIndex(df.GAME_DATE_EST)
 
     df = df.groupby('TEAM_ID').apply(reindex_by_date).reset_index(0, drop=True)
@@ -517,17 +493,16 @@ for season in boxscore_complete_team_processed['SEASON_ID'].unique():
 
 
 team_season_lagged_ranking_df = pd.concat(team_season_calendar_list)
+team_season_lagged_ranking_df = team_season_lagged_ranking_df.dropna(subset='fantasy_points_team_lagged_mean').reset_index(names='calendar_date')
 
-team_season_lagged_ranking_df = team_season_lagged_ranking_df[['TEAM_ID', 'SEASON_ID', 'fantasy_points_team_lagged_mean', 'fantasy_points_team_opposing_lagged_mean']].reset_index(names='calendar_date')
-team_season_lagged_ranking_df = team_season_lagged_ranking_df.dropna(subset='fantasy_points_team_lagged_mean')
-
-# Rank team's fantasy points scored
+# rank team's fantasy points scored
 team_season_lagged_ranking_df['fantasy_points_rank_overall_lagged_team'] = team_season_lagged_ranking_df.groupby('calendar_date')['fantasy_points_team_lagged_mean'].rank(ascending=False)
 
 # Rank how many points they give up to their opponent with the team giving up most points being #1
 team_season_lagged_ranking_df['fantasy_points_rank_overall_lagged_team_allowed'] = team_season_lagged_ranking_df.groupby('calendar_date')['fantasy_points_team_opposing_lagged_mean'].rank() 
-team_season_lagged_ranking_df = team_season_lagged_ranking_df[['calendar_date', 'TEAM_ID', 'fantasy_points_rank_overall_lagged_team', 'fantasy_points_rank_overall_lagged_team_allowed']]
 
+
+del team_ranking_base, 
 
 
 
