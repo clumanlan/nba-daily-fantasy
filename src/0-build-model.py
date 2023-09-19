@@ -448,13 +448,13 @@ boxscore_complete_team_processed = (boxscore_complete_team
     )
 
 
-# Get fantasy points allowed from other team
+# get fantasy points allowed from other team
 fantasy_points_allowed = boxscore_complete_team_processed[['GAME_ID', 'TEAM_ID', 'fantasy_points_team']]
 boxscore_complete_team_processed = pd.merge(boxscore_complete_team_processed, fantasy_points_allowed, on='GAME_ID', suffixes=['', '_opposing'], how='left').reset_index(drop=True)
 boxscore_complete_team_processed = boxscore_complete_team_processed.query('TEAM_ID != TEAM_ID_opposing')
 
 
-# Lag team fantasy points and opposing team fantasy points
+# lag team fantasy points and opposing team fantasy points
 boxscore_complete_team_processed = boxscore_complete_team_processed.sort_values(['GAME_DATE_EST'])
 
 team_group_shift = boxscore_complete_team_processed.groupby(['TEAM_ID'])[['fantasy_points_team', 'fantasy_points_team_opposing']].shift(1)
@@ -477,7 +477,6 @@ boxscore_complete_team_processed[['fantasy_points_team_lagged_mean', 'fantasy_po
 
 
 # create team ranking of fantasy points scored & allowed
-
 team_ranking_base = boxscore_complete_team_processed[['TEAM_ID', 'SEASON_ID', 'GAME_DATE_EST', 'fantasy_points_team_lagged_mean', 'fantasy_points_team_opposing_lagged_mean']]
 
 team_season_calendar_list = []
@@ -499,17 +498,16 @@ team_season_lagged_ranking_df = team_season_lagged_ranking_df.dropna(subset='fan
 team_season_lagged_ranking_df['fantasy_points_rank_overall_lagged_team'] = team_season_lagged_ranking_df.groupby('calendar_date')['fantasy_points_team_lagged_mean'].rank(ascending=False)
 
 # Rank how many points they give up to their opponent with the team giving up most points being #1
-team_season_lagged_ranking_df['fantasy_points_rank_overall_lagged_team_allowed'] = team_season_lagged_ranking_df.groupby('calendar_date')['fantasy_points_team_opposing_lagged_mean'].rank() 
+team_season_lagged_ranking_df['fantasy_points_rank_overall_lagged_team_allowed'] = team_season_lagged_ranking_df.groupby('calendar_date')['fantasy_points_team_opposing_lagged_mean'].rank(ascending=False) 
 
-
-del team_ranking_base, 
 
 
 
 # Create lagged team stats and basic stats from them, same as player plus additional fantasy points
 
 rel_team_cols_no_lag = ['GAME_ID', 'TEAM_ID', 'GAME_DATE_EST', 'SEASON_ID',  'home_away', 'game_type']
-rel_num_cols_team = rel_num_cols + ['fantasy_points_team']
+rel_num_cols_team = rel_num_cols + ['fantasy_points_team', 'fantasy_points_team_opposing']
+rel_num_cols_team.remove('fantasy_points')
 
 boxscore_complete_team_processed = boxscore_complete_team_processed[rel_team_cols_no_lag + rel_num_cols_team]
 boxscore_complete_team_processed = create_lagged_team_stats(boxscore_complete_team_processed, rel_num_cols_team)
@@ -517,14 +515,20 @@ boxscore_complete_team_processed = create_lagged_team_stats(boxscore_complete_te
 
 # Add ranking to the team boxscore
 boxscore_complete_team_processed = pd.merge(boxscore_complete_team_processed, team_season_lagged_ranking_df, left_on= ['GAME_DATE_EST', 'TEAM_ID'], right_on =['calendar_date', 'TEAM_ID'], how='left')
+
+# drop columns that are already in the player boxscore
 boxscore_complete_team_processed = boxscore_complete_team_processed.drop(['SEASON_ID', 'GAME_DATE_EST', 'SEASON_ID'], axis=1)
 
 # join team boxscore on itself so we can get opposing team stats
-boxscore_complete_team_processed = pd.merge(boxscore_complete_team_processed, boxscore_complete_team_processed, on='GAME_ID', how='left', suffixes=['', '_opposing'])
-boxscore_complete_team_processed = boxscore_complete_team_processed[boxscore_complete_team_processed['TEAM_ID'] != boxscore_complete_team_processed['TEAM_ID_opposing']]
+# boxscore_complete_team_processed = pd.merge(boxscore_complete_team_processed, boxscore_complete_team_processed, on='GAME_ID', how='left', suffixes=['', '_opposing'])
+#boxscore_complete_team_processed = boxscore_complete_team_processed[boxscore_complete_team_processed['TEAM_ID'] != boxscore_complete_team_processed['TEAM_ID_opposing']]
 
+
+del team_ranking_base, team_ranking_base, team_season_lagged_ranking_df, team_group_shift, fantasy_points_allowed, team_season_lagged_ranking_df
+
+
+#%%
 
 
 # Merge player and team dataframes ------------------------------------------------
 combined_player_team_boxscore = pd.merge(boxscore_complete_player_processed, boxscore_complete_team_processed, how='left', on=['GAME_ID', 'TEAM_ID'])
-#%%
