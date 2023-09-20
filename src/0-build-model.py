@@ -36,8 +36,9 @@ import xgboost as xgb
 # extra:
 #   explicitly define what each column is tht is being pulled in (game header to start)
 
-#%%
+
 # Custom Functions ------------------------------------------
+#%%
 # converts minutes played into total seconds --------------------
 def get_sec(time_str):
     """Get seconds from time."""
@@ -266,7 +267,8 @@ boxscore_complete_team = pd.merge(boxscore_complete_team, game_home_away, how='l
 boxscore_complete_team = pd.merge(boxscore_complete_team, game_info_df, on='GAME_ID', how='left')
 boxscore_complete_team = boxscore_complete_team[~boxscore_complete_team['game_type'].isin(['Pre-Season', 'All Star'])]
 
-del player_info_df, game_headers_df, game_headers_df_processed_filtered, boxscore_trad_player_df, boxscore_trad_team_df, boxscore_adv_player_df, boxscore_adv_team_df, game_home_away
+del player_info_df, game_headers_df, game_headers_df_processed_filtered, boxscore_trad_player_df, boxscore_trad_team_df, boxscore_adv_player_df, boxscore_adv_team_df, game_home_away, game_headers_initial_df, game_info_df 
+
 #%%
 
 
@@ -281,10 +283,7 @@ boxscore_complete_player, boxscore_complete_team
 # filter out players that don't play at all for that game (you can embed feature of last game played 
 
 
-boxscore_complete_player_processed = boxscore_complete_player[boxscore_complete_player['MIN']!='None']
-
-
-boxscore_complete_player_processed = (boxscore_complete_player_processed
+boxscore_complete_player_processed = (boxscore_complete_player
     .assign(
         seconds_played = lambda x: x['MIN'].apply(get_sec),
         fantasy_points = calculate_fantasy_points(boxscore_complete_player),
@@ -294,7 +293,6 @@ boxscore_complete_player_processed = (boxscore_complete_player_processed
         )
     .sort_values(by=['GAME_DATE_EST'])
     .reset_index(drop=True)
-    .drop(['MIN'], axis=1)
 )
 
 
@@ -360,7 +358,7 @@ boxscore_complete_player_processed['seconds_played_rolling_5game_avg_lag'] = box
 boxscore_complete_player_processed['fantasy_points_actual'] = boxscore_complete_player_processed['fantasy_points']
 
 ## rel id columns + target variable ------------
-rel_cols_player_no_lag = ['GAME_ID', 'SEASON_ID', 'GAME_DATE_EST', 'is_starter', 'PLAYER_ID', 'PLAYER_NAME', 'START_POSITION', 'POSITION', 'TEAM_ID', 'fantasy_points_actual']
+rel_cols_player_no_lag = ['GAME_ID', 'SEASON_ID', 'GAME_DATE_EST', 'is_starter', 'PLAYER_ID', 'PLAYER_NAME', 'START_POSITION', 'POSITION', 'TEAM_ID', 'fantasy_points_actual', 'MIN']
 
 ## num columns -----------
 rel_num_cols = ['seconds_played', 'FGM', 'FGA', 'FG_PCT', 'FG3M', 'FG3A','FTM', 'FTA',
@@ -372,7 +370,6 @@ rel_num_cols = ['seconds_played', 'FGM', 'FGA', 'FG_PCT', 'FG3M', 'FG3A','FTM', 
 
 ## additional columns ------------------------
 additional_cols =  ['rolling_games_played_season_lagged', 'rolling_games_played_overall_lagged', 'seconds_played_rolling_3game_avg_lag','seconds_played_rolling_5game_avg_lag']
-
 
 f_min, f_max, f_mean, f_std, f_sum = create_aggregate_rolling_functions()
 boxscore_complete_player_processed = boxscore_complete_player_processed[rel_cols_player_no_lag + rel_num_cols + additional_cols]
@@ -402,9 +399,10 @@ boxscore_complete_player_processed['fantasy_points_lagged_mean']  = (
 )
 
 
-
-
 ## create player season rankings ---------------------------------
+
+# create an if condition if multiple games and MIN='None' then remove
+boxscore_complete_player_processed[['PLAYER_ID', 'GAME_DATE_EST']].value_counts() > 2
 
 player_season_calendar_list = []
 player_season_ranking_calendar_base = boxscore_complete_player_processed[['PLAYER_ID', 'POSITION', 'fantasy_points_lagged_mean', 'SEASON_ID', 'GAME_DATE_EST']]
@@ -513,7 +511,7 @@ boxscore_complete_team_processed = boxscore_complete_team_processed[rel_team_col
 boxscore_complete_team_processed = create_lagged_team_stats(boxscore_complete_team_processed, rel_num_cols_team)
 
 
-# Add ranking to the team boxscore
+# add ranking to the team boxscore
 boxscore_complete_team_processed = pd.merge(boxscore_complete_team_processed, team_season_lagged_ranking_df, left_on= ['GAME_DATE_EST', 'TEAM_ID'], right_on =['calendar_date', 'TEAM_ID'], how='left')
 
 # drop columns that are already in the player boxscore
@@ -524,11 +522,18 @@ boxscore_complete_team_processed = boxscore_complete_team_processed.drop(['SEASO
 #boxscore_complete_team_processed = boxscore_complete_team_processed[boxscore_complete_team_processed['TEAM_ID'] != boxscore_complete_team_processed['TEAM_ID_opposing']]
 
 
-del team_ranking_base, team_ranking_base, team_season_lagged_ranking_df, team_group_shift, fantasy_points_allowed, team_season_lagged_ranking_df
-
+del team_ranking_base, team_ranking_base, team_season_lagged_ranking_df, team_group_shift, fantasy_points_allowed, team_group_shift, team_season_calendar_list
 
 #%%
 
-
 # Merge player and team dataframes ------------------------------------------------
 combined_player_team_boxscore = pd.merge(boxscore_complete_player_processed, boxscore_complete_team_processed, how='left', on=['GAME_ID', 'TEAM_ID'])
+
+# SEE DISTRIBUTION OF SECONDS PLAYED AND FIGURE OUT WHO TO FILTER OUT
+combined_player_team_boxscore.seconds_played_player
+[col for col in combined_player_team_boxscore.columns if 'seconds' in col]
+
+boxscore_complete_player_processed = boxscore_complete_player[boxscore_complete_player['MIN']!='None']
+
+rel_num_cols
+# DEFINE METRIC TO TRACK
